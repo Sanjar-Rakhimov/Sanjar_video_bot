@@ -1,5 +1,5 @@
 import os
-import asyncio
+import glob
 import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -9,7 +9,6 @@ from telegram.ext import (
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TOKEN_HERE")
 
-# Foydalanuvchi so'rovlarini saqlash
 user_requests = {}
 
 FORMATS = [
@@ -30,6 +29,21 @@ SUPPORTED_SITES = [
     "vimeo.com",
     "dailymotion.com",
 ]
+
+# YouTube 403 muammosini hal qilish uchun umumiy sozlamalar
+BASE_YDL_OPTS = {
+    'quiet': True,
+    'no_warnings': True,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'web'],
+        }
+    },
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+    },
+}
 
 
 def is_supported_url(url: str) -> bool:
@@ -75,33 +89,22 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # URL ni saqlash
     user_requests[user_id] = url
-
-    # Video ma'lumotini olish
     status_msg = await update.message.reply_text("🔍 Havola tekshirilmoqda...")
 
     try:
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': False,
-        }
+        ydl_opts = {**BASE_YDL_OPTS, 'extract_flat': False}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             title = info.get('title', 'Video')[:50]
-            duration = info.get('duration', 0)
-            mins = duration // 60
-            secs = duration % 60
+            duration = info.get('duration', 0) or 0
+            mins = int(duration) // 60
+            secs = int(duration) % 60
 
-        # Format tugmalarini yaratish
         keyboard = []
-        for label, fmt, ext in FORMATS:
-            callback_data = f"dl_{FORMATS.index((label, fmt, ext))}"
-            keyboard.append([InlineKeyboardButton(label, callback_data=callback_data)])
-
+        for i, (label, fmt, ext) in enumerate(FORMATS):
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"dl_{i}")])
         keyboard.append([InlineKeyboardButton("❌ Bekor qilish", callback_data="cancel")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
 
         await status_msg.edit_text(
             f"✅ *Video topildi!*\n\n"
@@ -109,13 +112,13 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏱ *Davomiyligi:* {mins}:{secs:02d}\n\n"
             f"📥 *Qaysi formatda yuklab olmoqchisiz?*",
             parse_mode="Markdown",
-            reply_markup=reply_markup
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     except Exception as e:
         await status_msg.edit_text(
             f"❌ Havola ochilmadi.\n\n"
-            f"Sabab: {str(e)[:100]}\n\n"
+            f"Sabab: {str(e)[:150]}\n\n"
             "Havolani tekshirib, qayta urinib ko'ring."
         )
 
@@ -137,16 +140,19 @@ async def handle_format_selection(update: Update, context: ContextTypes.DEFAULT_
     label, fmt, ext = FORMATS[fmt_index]
     url = user_requests[user_id]
 
-    await query.edit_message_text(f"⏳ *{label}* formatida yuklanmoqda...\n\nIltimos kuting ⌛", parse_mode="Markdown")
+    await query.edit_message_text(
+        f"⏳ *{label}* formatida yuklanmoqda...\n\nIltimos kuting ⌛",
+        parse_mode="Markdown"
+    )
 
     output_path = f"/tmp/{user_id}_video.%(ext)s"
 
     try:
         if ext == "mp3":
             ydl_opts = {
+                **BASE_YDL_OPTS,
                 'format': fmt,
                 'outtmpl': output_path,
-                'quiet': True,
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
@@ -155,9 +161,9 @@ async def handle_format_selection(update: Update, context: ContextTypes.DEFAULT_
             }
         else:
             ydl_opts = {
+                **BASE_YDL_OPTS,
                 'format': fmt,
                 'outtmpl': output_path,
-                'quiet': True,
                 'merge_output_format': 'mp4',
             }
 
@@ -165,8 +171,6 @@ async def handle_format_selection(update: Update, context: ContextTypes.DEFAULT_
             info = ydl.extract_info(url, download=True)
             title = info.get('title', 'video')[:40]
 
-        # Yuklab olingan faylni topish
-        import glob
         files = glob.glob(f"/tmp/{user_id}_video.*")
         if not files:
             raise FileNotFoundError("Fayl topilmadi")
@@ -174,18 +178,16 @@ async def handle_format_selection(update: Update, context: ContextTypes.DEFAULT_
         file_path = files[0]
         file_size = os.path.getsize(file_path)
 
-        # Telegram 50MB chekovi
         if file_size > 50 * 1024 * 1024:
             os.remove(file_path)
             await query.edit_message_text(
                 "⚠️ *Fayl juda katta!* (50MB dan oshadi)\n\n"
-                "Pastroq sifat tanlang:\n"
-                "• 480p, 360p yoki 240p",
+                "Pastroq sifat tanlang:\n• 480p, 360p yoki 240p",
                 parse_mode="Markdown"
             )
             return
 
-        await query.edit_message_text(f"📤 Telegramga yuborilmoqda...")
+        await query.edit_message_text("📤 Telegramga yuborilmoqda...")
 
         with open(file_path, 'rb') as f:
             if ext == "mp3":
@@ -204,22 +206,20 @@ async def handle_format_selection(update: Update, context: ContextTypes.DEFAULT_
                 )
 
         os.remove(file_path)
-        await query.edit_message_text(f"✅ *Yuborildi!* {label}\n\n📌 {title}", parse_mode="Markdown")
-
-        # So'rovni o'chirish
+        await query.edit_message_text(
+            f"✅ *Yuborildi!* {label}\n\n📌 {title}",
+            parse_mode="Markdown"
+        )
         del user_requests[user_id]
 
     except Exception as e:
-        # Fayllarni tozalash
-        import glob
         for f in glob.glob(f"/tmp/{user_id}_video.*"):
             try:
                 os.remove(f)
             except:
                 pass
-
         await query.edit_message_text(
-            f"❌ Yuklashda xatolik:\n\n`{str(e)[:150]}`\n\n"
+            f"❌ Yuklashda xatolik:\n\n`{str(e)[:200]}`\n\n"
             "Boshqa format tanlang yoki keyinroq urinib ko'ring.",
             parse_mode="Markdown"
         )
@@ -227,12 +227,10 @@ async def handle_format_selection(update: Update, context: ContextTypes.DEFAULT_
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CallbackQueryHandler(handle_format_selection))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
-
     print("✅ Bot ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
 
